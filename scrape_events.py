@@ -65,14 +65,13 @@ def get_start_offset():
               help= "The WhoScored match link",
               callback = validate_whoscored_link)
 def load_up_site(link):
-    click.secho("Select video", fg="green", bold = True)
+    click.secho("Select FULL match video", fg="green", bold = True)
 
     # store video path via tkinter
     get_video()
 
     # supply start time offset before action occurs
     get_start_offset()
-
 
     click.secho("Loading site...", fg="green", bold = True)
     driver = webdriver.Chrome()
@@ -114,101 +113,101 @@ def parse_site(driver):
     start_clipping(player_events, VIDEO_CONFIG["start_offset"])
 
 
-def get_first_half_duration(match_events):
-    last = 0
-    for event in match_events:
-        if event.get("period", {}).get("displayName") == "FirstHalf":
-            t = event.get("minute", 0) * 60 + event.get("second", 0)
-            last = max(last, t)
-    return last
 
 def get_events(player_id, match_event):
     player_id = int(player_id)
     events = []
     start = None
-    event_type = None
+    start_event_type = None
     success = None
     period = None
     last_seconds = None
+    first_half_finish_time = None
+    second_half_offset = None
 
-    first_half_duration = get_first_half_duration(match_event)
+    MAX_CLIP_DURATION = 10
+    MIN_CLIP_DURATION = 3
+
+    def clamp_end(start, end):
+        duration = end - start
+        if duration > MAX_CLIP_DURATION:
+            return start + MAX_CLIP_DURATION
+        if duration < MIN_CLIP_DURATION:
+            return start + MIN_CLIP_DURATION
+        return end
+
+    def save_event(end):
+        nonlocal start, start_event_type, success, period
+        events.append({
+            "start": start,
+            "end": clamp_end(start, end),
+            "type": start_event_type,
+            "outcome": success,
+            "period": period
+        })
+        start = None
+        start_event_type = None
+        success = None
+        period = None
 
     for event in match_event:
         player_id_int = event.get("playerId")
-
-        # CHANGE THIS BLOCK
-        minute = event.get("minute", 0)
+        minute = event.get("expandedMinute", 0)
         second = event.get("second", 0)
         current_period = event.get("period", {}).get("displayName")
+        current_event_type = event.get("type", {}).get("displayName")
 
+        # First half finish time
+        if current_period == "FirstHalf" and current_event_type == "End" and first_half_finish_time is None:
+            first_half_finish_time = (minute * 60) + second
+
+        # Second half offset calculation
+        if current_period == "SecondHalf" and current_event_type == "Start" and second_half_offset is None:
+            second_half_offset = ((minute * 60) + second) - first_half_finish_time
+
+        # Skip until we have timing info for second half
+        if current_period == "SecondHalf" and second_half_offset is None:
+            continue
+
+        # Calculate total seconds
         if current_period == "SecondHalf":
-            total_seconds = first_half_duration + ((minute - 45) * 60) + second
+            total_seconds = ((minute * 60) + second) - second_half_offset
         else:
             total_seconds = (minute * 60) + second
 
         last_seconds = total_seconds
 
+        # No player — close open clip
         if not player_id_int:
             if start:
-                events.append({
-                    "start": start,
-                    "end": total_seconds,
-                    "type": event_type,
-                    "outcome": success,
-                    "period": period
-                })
-                start = None
-                event_type = None
-                success = None
-                period = None
+                save_event(total_seconds)
             continue
 
         if player_id_int == player_id:
-            print(f"{minute} min, {second} secs during {current_period}")
+            # Period changed — close previous clip
             if start and current_period != period:
-                events.append({
-                    "start": start,
-                    "end": total_seconds,
-                    "type": event_type,
-                    "outcome": success,
-                    "period": period
-                })
-                start = None
+                save_event(total_seconds)
 
+            # Player still has possession — keep clip going
             if start:
                 continue
 
+            # Start new clip
             start = total_seconds
-            event_type = event['type']['displayName']
+            start_event_type = current_event_type
             success = event['outcomeType']['displayName']
             period = current_period
         else:
+            # Another player — close open clip
             if start is None:
                 continue
+            save_event(total_seconds)
 
-            events.append({
-                "start": start,
-                "end": total_seconds,
-                "type": event_type,
-                "outcome": success,
-                "period": period
-            })
-            start = None
-            event_type = None
-            success = None
-            period = None
-
+    # Don't lose last event
     if start is not None:
-        events.append({
-            "start": start,
-            "end": last_seconds,
-            "type": event_type,
-            "outcome": success,
-            "period": period
-        })
+        save_event(last_seconds)
 
     return events
-
 
 def merge_segments(segments):
     if not segments:
@@ -225,13 +224,13 @@ def merge_segments(segments):
 
 def start_clipping(player_events, startOffset):
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    output_file = os.path.join(desktop, "highlights.mp4")
+    output_file = os.path.join(desktop, f"compilation.mp4")
 
     # Build segments with offset applied
     segments = []
     for event in player_events:
         start = max(0, event["start"] - startOffset)
-        end = event["end"]
+        end = event["end"] + startOffset
         segments.append((start, end))
         print(event)
 
