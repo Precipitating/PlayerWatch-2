@@ -7,8 +7,13 @@ from tkinter import Tk, filedialog
 import os
 import subprocess
 VIDEO_CONFIG =  {
-    "path": None,
-    "start_offset": None
+    "first_half_path": None,
+    "second_half_path": None,
+    "start_offset": None,
+    "first_half_output": None,
+    "second_half_output": None
+
+
 }
 
 
@@ -32,7 +37,7 @@ def browse_video():
 
 
 def validate_whoscored_link(ctx, param, value):
-    pattern = r"^https://www\.whoscored\.com/matches/\d+/live/.*$"
+    pattern = r"^https://www\.whoscored\.com/matches/\d+/live(?:/.*)?$"
     if not re.match(pattern, value):
         raise click.BadParameter(
             "Must be https://www.whoscored.com/matches/<id>/live/..."
@@ -41,14 +46,25 @@ def validate_whoscored_link(ctx, param, value):
 
 
 
-def get_video():
+def get_video(type: object) -> bool:
     video = browse_video()
     if not video:
         click.secho("Can't find video", fg="red")
-        return
-    VIDEO_CONFIG["path"] = video
+        return False
+
+    if type == 1:
+        VIDEO_CONFIG["first_half_path"] = video
+    elif type == 2:
+        VIDEO_CONFIG["second_half_path"] = video
+    else:
+        click.secho("Invalid input, 1 or 2 should be used", fg="red")
+        return False
+
+    return True
 
 
+
+# apply an offset before action occurs, as the timestamps are the time the action occurs, and we may want an offset
 def get_start_offset():
     val = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
     VIDEO_CONFIG["start_offset"] = val
@@ -65,12 +81,14 @@ def get_start_offset():
               help= "The WhoScored match link",
               callback = validate_whoscored_link)
 def load_up_site(link):
-    click.secho("Select FULL match video", fg="green", bold = True)
+    click.secho("Select first half video", fg="green", bold = True)
+    first_half_valid = get_video(1)
+    if not first_half_valid : return
 
-    # store video path via tkinter
-    get_video()
+    click.secho("Select second half video", fg="green", bold=True)
+    second_half_valid = get_video(2)
+    if not first_half_valid: return
 
-    # supply start time offset before action occurs
     get_start_offset()
 
     click.secho("Loading site...", fg="green", bold = True)
@@ -107,16 +125,36 @@ def parse_site(driver):
     player_id = pick_player(player_map)
 
     # start storing the player's events
-    player_events = get_events(player_id, match_event)
+    first_half_events, second_half_events = get_events(player_id, match_event)
 
     # ffmpeg clipping
-    start_clipping(player_events, VIDEO_CONFIG["start_offset"])
+    start_clipping(first_half_events, VIDEO_CONFIG["start_offset"])
+    start_clipping(second_half_events, VIDEO_CONFIG["start_offset"])
 
+    # combine both clips
+    combine_videos(VIDEO_CONFIG["first_half_output"], VIDEO_CONFIG["second_half_output"], os.path.join(os.path.join(os.path.expanduser("~"), "Desktop"), "combinedCompilation.mp4"))
 
+def combine_videos(file1, file2, output_file):
+    """Concatenate two video files into one."""
+    subprocess.run([
+        "ffmpeg",
+        "-i", file1,
+        "-i", file2,
+        "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[outv][outa]",
+        "-map", "[outv]",
+        "-map", "[outa]",
+        "-c:v", "libx264",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-y",
+        output_file
+    ])
+    print(f"Combined to: {output_file}")
 
 def get_events(player_id, match_event):
     player_id = int(player_id)
-    events = []
+    first_half_events = []
+    second_half_events = []
     start = None
     start_event_type = None
     success = None
@@ -136,15 +174,24 @@ def get_events(player_id, match_event):
             return start + MIN_CLIP_DURATION
         return end
 
-    def save_event(end):
+    def save_event(end, type):
         nonlocal start, start_event_type, success, period
-        events.append({
-            "start": start,
-            "end": clamp_end(start, end),
-            "type": start_event_type,
-            "outcome": success,
-            "period": period
-        })
+        if type == "FirstHalf":
+            first_half_events.append({
+                "start": start,
+                "end": clamp_end(start, end),
+                "type": start_event_type,
+                "outcome": success,
+                "period": period
+            })
+        elif type == "SecondHalf":
+            second_half_events.append({
+                "start": start,
+                "end": clamp_end(start, end),
+                "type": start_event_type,
+                "outcome": success,
+                "period": period
+            })
         start = None
         start_event_type = None
         success = None
@@ -152,41 +199,24 @@ def get_events(player_id, match_event):
 
     for event in match_event:
         player_id_int = event.get("playerId")
-        minute = event.get("expandedMinute", 0)
+        minute = event.get("minute", 0)
         second = event.get("second", 0)
         current_period = event.get("period", {}).get("displayName")
         current_event_type = event.get("type", {}).get("displayName")
 
-        # First half finish time
-        if current_period == "FirstHalf" and current_event_type == "End" and first_half_finish_time is None:
-            first_half_finish_time = (minute * 60) + second
-
-        # Second half offset calculation
-        if current_period == "SecondHalf" and current_event_type == "Start" and second_half_offset is None:
-            second_half_offset = ((minute * 60) + second) - first_half_finish_time
-
-        # Skip until we have timing info for second half
-        if current_period == "SecondHalf" and second_half_offset is None:
-            continue
-
         # Calculate total seconds
-        if current_period == "SecondHalf":
-            total_seconds = ((minute * 60) + second) - second_half_offset
-        else:
-            total_seconds = (minute * 60) + second
-
-        last_seconds = total_seconds
+        total_seconds = (minute * 60) + second if current_period == "FirstHalf" else ((minute - 45) * 60) + second
 
         # No player — close open clip
         if not player_id_int:
             if start:
-                save_event(total_seconds)
+                save_event(total_seconds, current_period)
             continue
 
         if player_id_int == player_id:
             # Period changed — close previous clip
             if start and current_period != period:
-                save_event(total_seconds)
+                save_event(total_seconds, current_period)
 
             # Player still has possession — keep clip going
             if start:
@@ -201,13 +231,13 @@ def get_events(player_id, match_event):
             # Another player — close open clip
             if start is None:
                 continue
-            save_event(total_seconds)
+            save_event(total_seconds,current_period)
 
-    # Don't lose last event
+    #Don't lose last event
     if start is not None:
         save_event(last_seconds)
 
-    return events
+    return first_half_events, second_half_events
 
 def merge_segments(segments):
     if not segments:
@@ -223,8 +253,12 @@ def merge_segments(segments):
     return merged
 
 def start_clipping(player_events, startOffset):
+    period = player_events[0]['period']
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    output_file = os.path.join(desktop, f"compilation.mp4")
+    output_file = os.path.join(desktop, f"{period}_comp.mp4")
+    video_path = VIDEO_CONFIG["first_half_path"] if period == "FirstHalf" else VIDEO_CONFIG["second_half_path"]
+
+    VIDEO_CONFIG["first_half_output" if period == "FirstHalf" else "second_half_output"] = output_file
 
     # Build segments with offset applied
     segments = []
@@ -251,7 +285,7 @@ def start_clipping(player_events, startOffset):
 
     subprocess.run([
         "ffmpeg",
-        "-i", VIDEO_CONFIG["path"],
+        "-i", video_path,
         "-filter_complex", filter_complex,
         "-map", "[outv]",
         "-map", "[outa]",
@@ -265,9 +299,11 @@ def start_clipping(player_events, startOffset):
 
 
 
+
+
 def pick_player(player_map):
     chosen_id = click.prompt("Pick Player ID", type=str)
-    print(VIDEO_CONFIG["path"])
+
 
     while not player_map.get(chosen_id):
         chosen_id = click.prompt("Wrong player ID, try again", type=str)
