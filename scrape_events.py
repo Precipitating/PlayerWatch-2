@@ -6,10 +6,22 @@ import json
 from tkinter import Tk, filedialog
 import os
 import subprocess
+import cv2
+from PIL import Image
+import threading
+
 VIDEO_CONFIG =  {
+    "timer_timestamp_minute": 20,
+
+    "first_half_offset": 0,
+    "second_half_offset": 0,
+
     "first_half_path": None,
     "second_half_path": None,
+
     "start_offset": None,
+    "end_offset": None,
+
     "first_half_output": None,
     "second_half_output": None
 
@@ -64,13 +76,10 @@ def get_video(type: object) -> bool:
 
 
 
-# apply an offset before action occurs, as the timestamps are the time the action occurs, and we may want an offset
+# apply an offset before/after action occurs, as the timestamps are the time the action occurs, and we may want an offset
 def get_start_offset():
-    val = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
-    VIDEO_CONFIG["start_offset"] = val
 
-
-
+    VIDEO_CONFIG["start_offset"] = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
 
 
 @click.command()
@@ -89,12 +98,80 @@ def load_up_site(link):
     second_half_valid = get_video(2)
     if not first_half_valid: return
 
+    needs_calibration = click.confirm("Do the videos need calibrating? (video time matches match time?)", default=True)
+    if needs_calibration:
+        calibrate_halves()
+
     get_start_offset()
 
     click.secho("Loading site...", fg="green", bold = True)
     driver = webdriver.Chrome()
     driver.get(link)
     parse_site(driver)
+
+
+
+def get_match_time_manual(video_path, seek_minute):
+    """Show frame from video and let user manually input the match time."""
+    vid = cv2.VideoCapture(video_path)
+    vid.set(cv2.CAP_PROP_POS_MSEC, seek_minute * 60_000)
+    success, image = vid.read()
+    vid.release()
+
+    if not success:
+        click.secho("Failed to read frame", fg="red")
+        return None
+
+    # Show image
+    window_name = "Read the match clock, then close this window"
+    cv2.imshow(window_name, image)
+    click.secho("Look at the match clock, then press any key to close", fg="yellow")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    # Get manual input after image is closed
+    while True:
+        time_input = click.prompt("Enter match time shown (MM:SS)", type=str)
+
+        try:
+            parts = time_input.split(":")
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+
+            if 0 <= minutes <= 120 and 0 <= seconds <= 59:
+                return minutes, seconds
+            else:
+                click.secho("Invalid time range", fg="red")
+        except (ValueError, IndexError):
+            click.secho("Use format MM:SS (e.g. 45:27)", fg="red")
+
+def calibrate_halves():
+    """Calibrate both halves by showing a frame and asking for match time."""
+    for i in range(2):
+        half = "First Half" if i == 0 else "Second Half"
+        path = VIDEO_CONFIG["first_half_path"] if i == 0 else VIDEO_CONFIG["second_half_path"]
+
+        click.secho(f"\n{half}: Look at the match clock in the image", fg="green")
+
+        result = get_match_time_manual(path, VIDEO_CONFIG["timer_timestamp_minute"])
+
+        if result is None:
+            continue
+
+        minutes, seconds = result
+        detected_seconds = (minutes * 60) + seconds
+
+        if i == 0:
+            expected_seconds = VIDEO_CONFIG["timer_timestamp_minute"] * 60
+        else:
+            expected_seconds = (VIDEO_CONFIG["timer_timestamp_minute"] + 45) * 60
+
+        offset = detected_seconds - expected_seconds
+
+        click.secho(f"Time: {minutes:02d}:{seconds:02d}", fg="cyan")
+        click.secho(f"Offset: {offset} seconds", fg="green")
+
+        VIDEO_CONFIG["first_half_offset" if i == 0 else "second_half_offset"] = offset
 
 
 
@@ -128,8 +205,8 @@ def parse_site(driver):
     first_half_events, second_half_events = get_events(player_id, match_event)
 
     # ffmpeg clipping
-    start_clipping(first_half_events, VIDEO_CONFIG["start_offset"])
-    start_clipping(second_half_events, VIDEO_CONFIG["start_offset"])
+    start_clipping(first_half_events,)
+    start_clipping(second_half_events)
 
     # combine both clips
     combine_videos(VIDEO_CONFIG["first_half_output"], VIDEO_CONFIG["second_half_output"], os.path.join(os.path.join(os.path.expanduser("~"), "Desktop"), "combinedCompilation.mp4"))
@@ -176,18 +253,21 @@ def get_events(player_id, match_event):
 
     def save_event(end, type):
         nonlocal start, start_event_type, success, period
+        start_offset = start - VIDEO_CONFIG["first_half_offset" if type == "FirstHalf" else "second_half_offset"]
+        end_offset = end - VIDEO_CONFIG["first_half_offset" if type == "FirstHalf" else "second_half_offset"]
+
         if type == "FirstHalf":
             first_half_events.append({
-                "start": start,
-                "end": clamp_end(start, end),
+                "start": start_offset,
+                "end": clamp_end(start_offset, end_offset),
                 "type": start_event_type,
                 "outcome": success,
                 "period": period
             })
         elif type == "SecondHalf":
             second_half_events.append({
-                "start": start,
-                "end": clamp_end(start, end),
+                "start": start_offset,
+                "end": clamp_end(start_offset, end_offset) ,
                 "type": start_event_type,
                 "outcome": success,
                 "period": period
@@ -252,7 +332,7 @@ def merge_segments(segments):
             merged.append((start, end))
     return merged
 
-def start_clipping(player_events, startOffset):
+def start_clipping(player_events):
     period = player_events[0]['period']
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     output_file = os.path.join(desktop, f"{period}_comp.mp4")
@@ -263,8 +343,8 @@ def start_clipping(player_events, startOffset):
     # Build segments with offset applied
     segments = []
     for event in player_events:
-        start = max(0, event["start"] - startOffset)
-        end = event["end"] + startOffset
+        start = max(0, event["start"] - VIDEO_CONFIG["start_offset"])
+        end = event["end"] +  VIDEO_CONFIG["start_offset"]
         segments.append((start, end))
         print(event)
 
