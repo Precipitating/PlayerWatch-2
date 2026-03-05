@@ -1,6 +1,6 @@
 import scrape_events
 def start():
-    scrape_events.load_up_site()
+    scrape_events.start_program()
 
 
 

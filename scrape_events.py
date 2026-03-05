@@ -7,8 +7,9 @@ from tkinter import Tk, filedialog
 import os
 import subprocess
 import cv2
-from PIL import Image
-import threading
+import questionary
+from player import Player
+from concurrent.futures import ThreadPoolExecutor
 
 VIDEO_CONFIG =  {
     "timer_timestamp_minute": 20,
@@ -22,11 +23,13 @@ VIDEO_CONFIG =  {
     "start_offset": None,
     "end_offset": None,
 
-    "first_half_output": None,
-    "second_half_output": None
+    "action_conclusion": None,
+
+    "players_list": {}
 
 
 }
+
 
 
 def browse_video():
@@ -76,12 +79,27 @@ def get_video(type: object) -> bool:
 
 
 
-# apply an offset before/after action occurs, as the timestamps are the time the action occurs, and we may want an offset
-def get_start_offset():
+""" Determine if we want to clip succesful actions by the player or only unsucessful ones"""
+def choose_action_conclusion():
+    selected = questionary.select(
+        "Successful/unsuccessful actions only or include both?",
+        choices=["Both", "Successful","Unsuccessful"],
+        use_arrow_keys=True
+    ).ask()
 
+    if selected == "Both": return
+
+
+    VIDEO_CONFIG["action_conclusion"] = selected
+
+
+
+""" Apply an offset before action occurs"""
+def get_start_offset():
     VIDEO_CONFIG["start_offset"] = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
 
 
+"""The main function for displaying and processing CLI options"""
 @click.command()
 @click.option("--link",
               prompt=click.style("Enter WhoScored link (must be a live link!)",
@@ -89,7 +107,9 @@ def get_start_offset():
               fg = "cyan"),
               help= "The WhoScored match link",
               callback = validate_whoscored_link)
-def load_up_site(link):
+def start_program(link):
+
+    """ Input both video halves"""
     click.secho("Select first half video", fg="green", bold = True)
     first_half_valid = get_video(1)
     if not first_half_valid : return
@@ -98,22 +118,46 @@ def load_up_site(link):
     second_half_valid = get_video(2)
     if not first_half_valid: return
 
+    """ Sync video with match time (if required) """
     needs_calibration = click.confirm("Do the videos need calibrating? (video time matches match time?)", default=True)
     if needs_calibration:
         calibrate_halves()
 
     get_start_offset()
 
+    choose_action_conclusion()
+
+    """ Get match info via selenium"""
     click.secho("Loading site...", fg="green", bold = True)
     driver = webdriver.Chrome()
     driver.get(link)
-    parse_site(driver)
+    match_dict, match_info = parse_site(driver)
+
+    if match_dict is None or match_info is None:
+        print("match_dict or match_info is None, aborting")
+        return
+
+    """ Choose players to create a compilation of"""
+    initialize_player_class(match_dict, match_info)
+
+    if not VIDEO_CONFIG["players_list"]:
+        print("Didn't select a player! aborting")
+        return
+
+    """ Go through players_list and start the compilation creation"""
+    start_pipeline(match_info)
 
 
 
+
+
+
+"""Show frame from video and let user manually input the match time."""
 def get_match_time_manual(video_path, seek_minute):
-    """Show frame from video and let user manually input the match time."""
+
     vid = cv2.VideoCapture(video_path)
+    cv2.namedWindow("Preview", cv2.WINDOW_AUTOSIZE)
+    cv2.setWindowProperty("Preview", cv2.WND_PROP_TOPMOST, 1)
     vid.set(cv2.CAP_PROP_POS_MSEC, seek_minute * 60_000)
     success, image = vid.read()
     vid.release()
@@ -123,8 +167,7 @@ def get_match_time_manual(video_path, seek_minute):
         return None
 
     # Show image
-    window_name = "Read the match clock, then close this window"
-    cv2.imshow(window_name, image)
+    cv2.imshow("Preview", image)
     click.secho("Look at the match clock, then press any key to close", fg="yellow")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
@@ -145,6 +188,8 @@ def get_match_time_manual(video_path, seek_minute):
         except (ValueError, IndexError):
             click.secho("Use format MM:SS (e.g. 45:27)", fg="red")
 
+
+""" Determine offset to sync the video with match time and apply to timestamps later"""
 def calibrate_halves():
     """Calibrate both halves by showing a frame and asking for match time."""
     for i in range(2):
@@ -174,44 +219,27 @@ def calibrate_halves():
         VIDEO_CONFIG["first_half_offset" if i == 0 else "second_half_offset"] = offset
 
 
-
-
-
 def parse_site(driver):
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     element = soup.select_one('script:-soup-contains("matchCentreData")')
 
     if not element:
         click.secho(message="Can't find matchCentreData from link", fg="red")
-        return
+        return None, None
 
     click.secho("Site loaded and looks correct, starting parse...", fg="green", bold=True)
     match_dict = json.loads(element.text.split("matchCentreData: ")[1].split(",\n")[0])
-
     match_event = match_dict['events']
 
-    # dict: {name} : {playerId}
-    player_map = match_dict['playerIdNameDictionary']
+    return match_dict, match_event
 
-    # display names available to use
-    click.secho("Input the player ID you want to make a compilation of", fg="yellow")
-    for id, name in player_map.items():
-        click.secho(message= f"{id}. {name}", fg="green")
-
-    # validate player id
-    player_id = pick_player(player_map)
-
-    # start storing the player's events
-    first_half_events, second_half_events = get_events(player_id, match_event)
-
-    # ffmpeg clipping
-    start_clipping(first_half_events,)
-    start_clipping(second_half_events)
-
-    # combine both clips
-    combine_videos(VIDEO_CONFIG["first_half_output"], VIDEO_CONFIG["second_half_output"], os.path.join(os.path.join(os.path.expanduser("~"), "Desktop"), "combinedCompilation.mp4"))
 
 def combine_videos(file1, file2, output_file):
+
+    if file1 is None or file2 is None:
+        print("No point combining, one half is missing. Potentially no actions in one half.")
+        return
+
     """Concatenate two video files into one."""
     subprocess.run([
         "ffmpeg",
@@ -228,17 +256,15 @@ def combine_videos(file1, file2, output_file):
     ])
     print(f"Combined to: {output_file}")
 
-def get_events(player_id, match_event):
-    player_id = int(player_id)
-    first_half_events = []
-    second_half_events = []
-    start = None
-    start_event_type = None
-    success = None
-    period = None
-    last_seconds = None
-    first_half_finish_time = None
-    second_half_offset = None
+
+""" Determines if current event is succesful or not """
+def event_is_action_conclusion(event_conclusion):
+    if event_conclusion is None: return False
+
+    return event_conclusion == VIDEO_CONFIG["action_conclusion"]
+
+""" The main function that stores clipping ranges via timestamps provided by WhoScored"""
+def get_events(match_event, players_list):
 
     MAX_CLIP_DURATION = 10
     MIN_CLIP_DURATION = 3
@@ -251,74 +277,92 @@ def get_events(player_id, match_event):
             return start + MIN_CLIP_DURATION
         return end
 
-    def save_event(end, type):
-        nonlocal start, start_event_type, success, period
-        start_offset = start - VIDEO_CONFIG["first_half_offset" if type == "FirstHalf" else "second_half_offset"]
-        end_offset = end - VIDEO_CONFIG["first_half_offset" if type == "FirstHalf" else "second_half_offset"]
+    def save_event(playerClass, end, period):
+        start_offset = playerClass.current_start - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
+        end_offset = end - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
 
-        if type == "FirstHalf":
-            first_half_events.append({
+        if period == "FirstHalf":
+            playerClass.first_half_events.append({
                 "start": start_offset,
                 "end": clamp_end(start_offset, end_offset),
-                "type": start_event_type,
-                "outcome": success,
+                "type": playerClass.start_event_type,
+                "outcome": playerClass.success,
                 "period": period
             })
-        elif type == "SecondHalf":
-            second_half_events.append({
+        elif period == "SecondHalf":
+            playerClass.second_half_events.append({
                 "start": start_offset,
                 "end": clamp_end(start_offset, end_offset) ,
-                "type": start_event_type,
-                "outcome": success,
+                "type": playerClass.start_event_type,
+                "outcome": playerClass.success,
                 "period": period
             })
-        start = None
-        start_event_type = None
-        success = None
-        period = None
+        playerClass.current_start = None
+        playerClass.start_event_type = None
+        playerClass.success = None
 
+    """ NOTE: We shouldn't redo this per player due to inefficiencies, do it inside the loop instead """
     for event in match_event:
-        player_id_int = event.get("playerId")
+        current_player_id = event.get("playerId")
+        current_player_id = str(current_player_id)
         minute = event.get("minute", 0)
         second = event.get("second", 0)
         current_period = event.get("period", {}).get("displayName")
         current_event_type = event.get("type", {}).get("displayName")
 
         # Calculate total seconds
+        # Not using expandedMinute (which includes added time)
+        # due to weird sync issues at this moment, hence why -45
+        # is negated in the second half
+
         total_seconds = (minute * 60) + second if current_period == "FirstHalf" else ((minute - 45) * 60) + second
 
-        # No player — close open clip
-        if not player_id_int:
-            if start:
-                save_event(total_seconds, current_period)
-            continue
-
-        if player_id_int == player_id:
-            # Period changed — close previous clip
-            if start and current_period != period:
-                save_event(total_seconds, current_period)
-
-            # Player still has possession — keep clip going
-            if start:
+        for playerId, playerClass in players_list.items():
+            # No player — close open clip
+            if not current_player_id:
+                if playerClass.current_start:
+                    save_event(playerClass, total_seconds, current_period)
                 continue
 
-            # Start new clip
-            start = total_seconds
-            start_event_type = current_event_type
-            success = event['outcomeType']['displayName']
-            period = current_period
-        else:
-            # Another player — close open clip
-            if start is None:
-                continue
-            save_event(total_seconds,current_period)
+            if current_player_id == playerId:
+                # Store specific action conclusions if specified
+                if VIDEO_CONFIG["action_conclusion"] is not None:
+                    outcome = event.get("outcomeType", {}).get("displayName")
+                    matches_conclusion = event_is_action_conclusion(outcome)
+                    if matches_conclusion is False: continue
 
-    #Don't lose last event
-    if start is not None:
-        save_event(last_seconds)
 
-    return first_half_events, second_half_events
+                # Period changed — close previous clip
+                if playerClass.current_start:
+                    save_event(playerClass, total_seconds, current_period)
 
+                # Player still has possession — keep clip going
+                if playerClass.current_start:
+                    continue
+
+                # Start new clip
+                playerClass.current_start = total_seconds
+                playerClass.start_event_type = current_event_type
+                playerClass.success = event['outcomeType']['displayName']
+            else:
+                # Another player — close open clip
+                if playerClass.current_start is None:
+                    continue
+                save_event(playerClass, total_seconds,current_period)
+
+    # Don't lose last event
+    for playerId, playerClass in players_list.items():
+        if playerClass.current_start is not None:
+            save_event(playerClass, 99999, current_period)
+
+
+
+
+
+
+
+
+""" Handle ffmpeg time overlap when cropping """
 def merge_segments(segments):
     if not segments:
         return []
@@ -332,13 +376,23 @@ def merge_segments(segments):
             merged.append((start, end))
     return merged
 
-def start_clipping(player_events):
+def start_clipping(player, player_events):
+    if not player_events:
+        print(f"{player.name} has no events in this half ")
+        return
     period = player_events[0]['period']
+
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-    output_file = os.path.join(desktop, f"{period}_comp.mp4")
+    output_folder = os.path.join(desktop, player.name)
+    os.makedirs(output_folder, exist_ok=True)
+    output_file = os.path.join(desktop, output_folder, f"{player.name}_{period}_comp.mp4")
+
+    # get input video path depending on period
     video_path = VIDEO_CONFIG["first_half_path"] if period == "FirstHalf" else VIDEO_CONFIG["second_half_path"]
 
-    VIDEO_CONFIG["first_half_output" if period == "FirstHalf" else "second_half_output"] = output_file
+    # create output path  depending on period
+    setattr(player,"first_half_output" if period == "FirstHalf" else "second_half_output", output_file)
+
 
     # Build segments with offset applied
     segments = []
@@ -379,16 +433,47 @@ def start_clipping(player_events):
 
 
 
+def initialize_player_class(match_dict, match_info):
+    player_dict = match_dict["playerIdNameDictionary"]
+    player_array =  [{"name": name, "value": key} for key, name in player_dict.items()]
+
+    selected = questionary.checkbox(
+        message="Select the player's you want to make a compilation of (press enter when done):",
+        choices= player_array
+    ).ask()
+
+    """ Initialize player class for each selected player """
+    for id in selected:
+        name = player_dict[id]
+        print(f'Initializing player {name} with id {id}')
+        new_player = Player(name, id)
+        VIDEO_CONFIG["players_list"][id] = new_player
 
 
-def pick_player(player_map):
-    chosen_id = click.prompt("Pick Player ID", type=str)
+""" Start creating clips from time frames"""
+def process_player(player):
+    # Clip first and second half
+    start_clipping(player, player.first_half_events)
+    start_clipping(player, player.second_half_events)
 
+    # Combine the clips into full video
+    output_path = os.path.join(
+        os.path.expanduser("~"),
+        "Desktop",
+        player.name,
+        f"{player.name}_full_comp.mp4"
+    )
+    combine_videos(player.first_half_output, player.second_half_output, output_path)
 
-    while not player_map.get(chosen_id):
-        chosen_id = click.prompt("Wrong player ID, try again", type=str)
+""" Start going through the process to create the compilation"""
+""" match_info - The full events data of the match """
+def start_pipeline(match_info):
+    players_list = VIDEO_CONFIG["players_list"]
+    get_events(match_info, players_list)
 
-    return chosen_id
+    num_threads = os.cpu_count() or 4  # default to 4 if detection fails
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:  # adjust max_workers as needed
+        executor.map(process_player, players_list.values())
 
 
 
