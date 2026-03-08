@@ -3,48 +3,19 @@ from selenium import webdriver
 import re
 import click
 import json
-from tkinter import Tk, filedialog
 import os
 import subprocess
 from typing import Any
 import cv2
 import questionary
-
+from utility import file_picker
 import database
 import player
 from player import Player
 from concurrent.futures import ThreadPoolExecutor
 import sys
 
-from database import VIDEO_CONFIG
-
-
-def file_picker(file_types: str) -> str:
-    """
-    Opens a filedialog with supplied file_types
-    Args:
-        file_types (str): String of file types to accept when filedialog is open
-
-    Returns:
-        str: File path of the selected file
-
-    """
-    root = Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)  # <-- Force to front
-    root.update()                       # <-- Process the attribute change
-
-    file_path = filedialog.askopenfilename(
-        parent=root,                    # <-- Attach to root
-        title="Select a football clip",
-        filetypes=[
-            ("Input", file_types),
-            ("All files", "*.*")
-        ]
-    )
-
-    root.destroy()
-    return file_path
+from database import VIDEO_CONFIG, ACTION_TYPES
 
 
 def validate_whoscored_link(ctx: click.Context, param: click.Parameter, value: str) -> str:
@@ -69,8 +40,6 @@ def validate_whoscored_link(ctx: click.Context, param: click.Parameter, value: s
 
     VIDEO_CONFIG["match_id"] = re.search(r"/matches/(\d+)", value).group(1)
     return value
-
-
 
 def get_video(type: int) -> bool:
     """
@@ -98,48 +67,6 @@ def get_video(type: int) -> bool:
 
 
 
-
-def get_audio() -> bool:
-    """
-   Determine if we want to use custom audio via
-   questionary select input
-
-    Returns:
-       boolean: True if path is set or else False
-    """
-    require_custom_audio = questionary.select("Use custom audio?", choices=["Yes", "No"]).ask()
-
-    if require_custom_audio == "Yes":
-        audio_path = file_picker("*.mp3 *.wav *.aac *.m4a *.flac *.ogg *.opus *.wma *.aiff *.alac")
-        if audio_path:
-            VIDEO_CONFIG["audio_path"] = audio_path
-            return True
-
-    return False
-
-
-
-
-
-def choose_action_conclusion() -> None:
-    """
-    Determine if we want to clip succesful/unsucessful actions via
-    questionary select input
-
-    """
-
-    selected = questionary.select(
-        "Successful/unsuccessful actions only or include both?",
-        choices=["Both", "Successful","Unsuccessful"],
-        use_arrow_keys=True
-    ).ask()
-
-    if selected == "Both": return
-
-
-    VIDEO_CONFIG["action_conclusion"] = selected
-
-
 def get_start_offset():
     """ Store the offset before action occurs via user input """
     VIDEO_CONFIG["start_offset"] = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
@@ -164,6 +91,8 @@ def start_program(link: str) -> None :
         link (str): WhoScored link, must be a live link else repeats.
     """
 
+
+
     # Input both video halves
     click.secho("Select first half video", fg="green", bold = True)
     first_half_valid = get_video(1)
@@ -173,8 +102,6 @@ def start_program(link: str) -> None :
     second_half_valid = get_video(2)
     if not second_half_valid: return
 
-    # Custom audio option
-    custom_audio = get_audio()
 
     # Sync video with match time (if required)
     needs_calibration = click.confirm("Do the videos need calibrating? (video time matches match time?)", default=True)
@@ -184,9 +111,6 @@ def start_program(link: str) -> None :
     # Applies a negative offset at start time before we ffmpeg crop
     get_start_offset()
 
-    # User input to determine if we want a succcesful or unsuccesful action (or both)
-    choose_action_conclusion()
-
     # Get match info via selenium
     click.secho("Loading site...", fg="green", bold = True)
     match_dict, match_info = parse_site(link)
@@ -194,12 +118,10 @@ def start_program(link: str) -> None :
     # Choose players to create a compilation of
     initialize_player_class(match_dict)
 
-    if not VIDEO_CONFIG["players_list"]:
-        print("Didn't select a player! aborting")
-        return
-
     # Go through players_list and start the compilation creation
     start_pipeline(match_info)
+
+
 
 
 def get_match_time_manual(video_path: str, seek_minute: int) -> None:
@@ -314,22 +236,8 @@ def parse_site(link: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]] |
             print("Missing match_events in db, we'll create it")
 
         if match_dict and match_events:
-            click.secho("Match data already exists, using!", fg="yellow")
+            click.secho("Match data already exists in database!, using!", fg="yellow")
             return match_dict, match_events
-
-
-
-
-
-
-    # try:
-    #     with open(os.path.join(VIDEO_CONFIG["cwd"], "FootballMatchData", f"{VIDEO_CONFIG["match_id"]}.json"), encoding="utf-8") as f:
-    #         click.secho("Match data already exists, using!", fg="yellow")
-    #         match_dict = json.load(f)
-    #         match_event = match_dict['events']
-    #         return match_dict, match_event
-    # except FileNotFoundError:
-    #     pass
 
 
     driver = webdriver.Chrome()
@@ -353,40 +261,32 @@ def parse_site(link: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]] |
                        json.dumps(match_event))
 
 
-
-    # save to a folder called "match_data" so we can skip the parse process if reran
-    # save_path = os.path.join(VIDEO_CONFIG["cwd"],"FootballMatchData")
-    # os.makedirs(save_path, exist_ok=True)
-    # with open(os.path.join(save_path, f"{VIDEO_CONFIG["match_id"]}.json"), "w", encoding="utf-8") as f:
-    #     json.dump(match_dict, f)
-
     return match_dict, match_event
 
 
-def combine_videos(file1: str, file2: str, output_file: str) -> None:
+def combine_videos(player: Player.player, output_file: str) -> None:
     """
     Use Ffmpeg to combine two clips together, mainly used for combining first half and second half clips.
     Args:
-        file1 (str): Path of the processed video
-        file2 (str): Path of the processed video
+        player (str): Player class
         output_file (str): Path of the output video
     """
     # Returns early if one file input is missing, this usually means the player has
     # only has actions in one half, meaning combination is unnecessary.
 
-    if file1 is None or file2 is None:
-        print("No point combining, one half is missing. Potentially no actions in one half.")
+    if player.first_half_output is None or player.second_half_output is None:
+        print("No point combining this player, one half is missing. Potentially no actions in one half.")
         return
 
-    concat_input = f"file '{file1}'\nfile '{file2}'\n"
+    concat_input = f"file '{player.first_half_output}'\nfile '{player.second_half_output}'\n"
 
-    if VIDEO_CONFIG["audio_path"]:
+    if player.custom_audio is not None:
         cmd = [
             "ffmpeg",
             "-f", "concat", "-safe", "0",
             "-protocol_whitelist", "file,pipe",
             "-i", "pipe:",
-            "-stream_loop", "-1", "-i", VIDEO_CONFIG["audio_path"],
+            "-stream_loop", "-1", "-i", player.custom_audio,
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
             "-map", "0:v",
@@ -415,20 +315,108 @@ def combine_videos(file1: str, file2: str, output_file: str) -> None:
     print(f"Combined to: {output_file}")
 
 
-def event_is_action_conclusion(event_conclusion: str) -> bool    :
-    """
-    Simple helper to return if the event's conclusion is succesful or not, and checks if it
-    matches the player's setting of only wanting succesful actions (or not)
-
-    Args:
-        event_conclusion (str): Either Successful or Unsuccesful, should be the current event's conclusion
-    """
-    if event_conclusion is None: return False
-
-    return event_conclusion == VIDEO_CONFIG["action_conclusion"]
 
 
-def get_events(match_event : list[dict[str, Any]], players_list: dict[str, player.Player]):
+
+# def get_events(match_event : list[dict[str, Any]], players_list: dict[str, player.Player]):
+#     """
+#     The main processing function that goes through match_event (has all match events data) and stores its timestamps
+#     if the event's player id key exists in player_list
+#
+#     Args:
+#         match_event (list[dict[str, Any]]): Events data, stores all events of every player in ascending order
+#         players_list (dict[str, player]): Dictionary with the key of the player's id and a value of their player class
+#     """
+#
+#     MAX_CLIP_DURATION = 10
+#     MIN_CLIP_DURATION = 1
+#
+#     # Clamp time data within bounds within MIN_CLIP_DURATION & MAX_CLIP_DURATION
+#     # Mainly to prevent end getting too long if theres no events for a long time if current_start is active
+#     def clamp_end(start: int, end: int):
+#         duration = end - start
+#         if duration > MAX_CLIP_DURATION:
+#             return start + MAX_CLIP_DURATION
+#         if duration < MIN_CLIP_DURATION:
+#             return start + MIN_CLIP_DURATION
+#         return end
+#
+#     # Save event to specified player class, depending which period it is
+#     def save_event(playerClass: player.Player, end: int, period: str):
+#         start_offset = playerClass.current_start - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
+#         end_offset = end - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
+#
+#         event_data = {
+#             "start": start_offset,
+#             "end": clamp_end(start_offset, end_offset),
+#             "type": playerClass.start_event_type,
+#             "outcome": playerClass.success,
+#             "period": period
+#         }
+#
+#         if period == "FirstHalf":
+#             playerClass.first_half_events.append(event_data)
+#         elif period == "SecondHalf":
+#             playerClass.second_half_events.append(event_data)
+#
+#         playerClass.current_start = None
+#         playerClass.start_event_type = None
+#         playerClass.success = None
+#
+#     # NOTE: We shouldn't rerun this loop per player due to inefficiencies, run this loop ONCE
+#     for event in match_event:
+#         # Seperate important event data into variables
+#         current_player_id = str(event.get("playerId", ""))
+#         minute = event.get("minute", 0)
+#         second = event.get("second", 0)
+#         current_period = event.get("period", {}).get("displayName")
+#         current_event_type = event.get("type", {}).get("displayName")
+#         outcome = event.get("outcomeType", {}).get("displayName")
+#
+#         # Calculate total seconds
+#         # Not using expandedMinute (which includes added time)
+#         # due to weird sync issues at this moment, hence why -45
+#         # is negated in the second half
+#         total_seconds = (minute * 60) + second if current_period == "FirstHalf" else ((minute - 45) * 60) + second
+#
+#         for playerId, playerClass in players_list.items():
+#             # No player event - close any open clip
+#             if not current_player_id:
+#                 if playerClass.current_start is not None:
+#                     save_event(playerClass, total_seconds, current_period)
+#                 continue
+#
+#             if current_player_id == playerId:
+#                 # Action conclusion filter
+#                 # If not None, it's either filtering Successful events or Unsuccessful
+#                 if playerClass.action_conclusion is not None:
+#                     if not playerClass.event_is_action_conclusion(outcome):
+#                         continue
+#
+#                 # If user has selected specific events to be shown, check if this current
+#                 # event matches it.
+#                 if playerClass.filtered_events is not None:
+#                     if current_event_type not in playerClass.filtered_events:
+#                         continue
+#
+#                 if playerClass.current_start is not None:
+#                     # Player still on the ball - extend clip, update outcome
+#                     playerClass.success = event.get("outcomeType", {}).get("displayName")
+#                 else:
+#                     # Start new clip
+#                     playerClass.current_start = total_seconds
+#                     playerClass.start_event_type = current_event_type
+#                     playerClass.success = event.get("outcomeType", {}).get("displayName")
+#             else:
+#                 # Different player touched the ball or some other event - close open clip
+#                 if playerClass.current_start is not None:
+#                     save_event(playerClass, total_seconds, current_period)
+#
+#     # Close any remaining open clips
+#     for playerId, playerClass in players_list.items():
+#         if playerClass.current_start is not None:
+#             save_event(playerClass, playerClass.current_start + MIN_CLIP_DURATION, current_period)
+def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player.Player]):
     """
     The main processing function that goes through match_event (has all match events data) and stores its timestamps
     if the event's player id key exists in player_list
@@ -436,13 +424,15 @@ def get_events(match_event : list[dict[str, Any]], players_list: dict[str, playe
     Args:
         match_event (list[dict[str, Any]]): Events data, stores all events of every player in ascending order
         players_list (dict[str, player]): Dictionary with the key of the player's id and a value of their player class
+
+    Note:
+        Player class must have a `current_period` attribute (initialized to None) to track
+        which period an open clip belongs to.
     """
 
     MAX_CLIP_DURATION = 10
     MIN_CLIP_DURATION = 1
 
-    # Clamp time data within bounds within MIN_CLIP_DURATION & MAX_CLIP_DURATION
-    # Mainly to prevent end getting too long if theres no events for a long time if current_start is active
     def clamp_end(start: int, end: int):
         duration = end - start
         if duration > MAX_CLIP_DURATION:
@@ -451,10 +441,12 @@ def get_events(match_event : list[dict[str, Any]], players_list: dict[str, playe
             return start + MIN_CLIP_DURATION
         return end
 
-    # Save event to specified player class, depending which period it is
-    def save_event(playerClass: player.Player, end: int, period: str):
-        start_offset = playerClass.current_start - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
-        end_offset = end - VIDEO_CONFIG["first_half_offset" if period == "FirstHalf" else "second_half_offset"]
+
+    def save_event(playerClass: player.Player, end: int):
+        period = playerClass.current_period
+        offset_key = "first_half_offset" if period == "FirstHalf" else "second_half_offset"
+        start_offset = playerClass.current_start - VIDEO_CONFIG[offset_key]
+        end_offset = end - VIDEO_CONFIG[offset_key]
 
         event_data = {
             "start": start_offset,
@@ -470,57 +462,79 @@ def get_events(match_event : list[dict[str, Any]], players_list: dict[str, playe
             playerClass.second_half_events.append(event_data)
 
         playerClass.current_start = None
+        playerClass.current_period = None
         playerClass.start_event_type = None
         playerClass.success = None
 
-    # NOTE: We shouldn't rerun this loop per player due to inefficiencies, run this loop ONCE
+    def close_all_clips(end: int, exclude_id: str = None):
+        for pid, pc in players_list.items():
+            if pid != exclude_id and pc.current_start is not None:
+                save_event(pc, end)
+
+    previous_period = None
+    last_total_seconds = 0
+
     for event in match_event:
-        # Seperate important event data into variables
         current_player_id = str(event.get("playerId", ""))
         minute = event.get("minute", 0)
         second = event.get("second", 0)
         current_period = event.get("period", {}).get("displayName")
         current_event_type = event.get("type", {}).get("displayName")
+        # FIX #3: Use safe access consistently
+        outcome = event.get("outcomeType", {}).get("displayName")
 
-        # Calculate total seconds
-        # Not using expandedMinute (which includes added time)
-        # due to weird sync issues at this moment, hence why -45
-        # is negated in the second half
         total_seconds = (minute * 60) + second if current_period == "FirstHalf" else ((minute - 45) * 60) + second
 
-        for playerId, playerClass in players_list.items():
-            # No player event - close any open clip
-            if not current_player_id:
-                if playerClass.current_start is not None:
-                    save_event(playerClass, total_seconds, current_period)
-                continue
+        #Close all open clips on period transition so first-half clips
+        # don't bleed into the second half with mismatched timestamps/offsets
+        if previous_period is not None and current_period != previous_period:
+            close_all_clips(last_total_seconds)
+        previous_period = current_period
+        last_total_seconds = total_seconds
 
-            if current_player_id == playerId:
-                # Action conclusion filter
-                # If not None, it's either filtering Successful events or Unsuccessful
-                if VIDEO_CONFIG["action_conclusion"] is not None:
-                    outcome = event.get("outcomeType", {}).get("displayName")
-                    if not event_is_action_conclusion(outcome):
-                        continue
+        # No player on the event - close all open clips
+        if not current_player_id:
+            close_all_clips(total_seconds)
+            continue
 
-                if playerClass.current_start is not None:
+        # FIX #5: O(1) dict lookup instead of iterating all players to find a match
+        matching_player = players_list.get(current_player_id)
+
+        if matching_player is not None:
+            should_process = True
+
+            # Action conclusion filter
+            if matching_player.action_conclusion is not None:
+                if not matching_player.event_is_action_conclusion(outcome):
+                    if matching_player.current_start is not None:
+                        save_event(matching_player, total_seconds)
+                    should_process = False
+
+            # Filtered events filter
+            if should_process and matching_player.filtered_events is not None:
+                if current_event_type not in matching_player.filtered_events:
+                    if matching_player.current_start is not None:
+                        save_event(matching_player, total_seconds)
+                    should_process = False
+
+            if should_process:
+                if matching_player.current_start is not None:
                     # Player still on the ball - extend clip, update outcome
-                    playerClass.success = event['outcomeType']['displayName']
+                    matching_player.success = outcome
                 else:
-                    # Start new clip
-                    playerClass.current_start = total_seconds
-                    playerClass.start_event_type = current_event_type
-                    playerClass.success = event['outcomeType']['displayName']
-            else:
-                # Different player touched the ball or some other event - close open clip
-                if playerClass.current_start is not None:
-                    save_event(playerClass, total_seconds, current_period)
+                    # Start new clip — store the period alongside the start time
+                    matching_player.current_start = total_seconds
+                    matching_player.current_period = current_period
+                    matching_player.start_event_type = current_event_type
+                    matching_player.success = outcome
+
+        # Close all other players' open clips (different player touched the ball)
+        close_all_clips(total_seconds, exclude_id=current_player_id)
 
     # Close any remaining open clips
-    for playerId, playerClass in players_list.items():
+    for _, playerClass in players_list.items():
         if playerClass.current_start is not None:
-            save_event(playerClass, playerClass.current_start + MIN_CLIP_DURATION, current_period)
-
+            save_event(playerClass, playerClass.current_start + MIN_CLIP_DURATION)
 
 
 
@@ -565,7 +579,7 @@ def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -
     period = player_events[0]['period']
 
     # Should be None or contain the windows path to the audio
-    audio_path = VIDEO_CONFIG.get("audio_path")
+    audio_path = player.custom_audio
 
     # Create output file & folder's path
     output_folder = os.path.join(VIDEO_CONFIG["cwd"], player.name)
@@ -646,7 +660,8 @@ def initialize_player_class(match_dict: dict[str, str]):
     # Ask the user to choose the players to create a compilation of
     selected = questionary.checkbox(
         message="Select the player's you want to make a compilation of (press enter when done):",
-        choices= player_array
+        choices= player_array,
+        validate=lambda choice: True if len(choice) > 0 else "Select at least one option",
     ).ask()
 
     # Initialize player class for each selected player and store to VIDEO_CONFIG["players_list"]
@@ -654,6 +669,17 @@ def initialize_player_class(match_dict: dict[str, str]):
         name = player_dict[id]
         print(f'Initializing player {name} with id {id}')
         new_player = Player(name, id)
+
+        # Custom audio option
+        new_player.get_audio()
+
+        # User input to determine if we want a succcesful or unsuccesful action (or both)
+        new_player.choose_action_conclusion()
+
+        # Choose action filter if required
+        new_player.filter_events()
+
+        # Store player to a dictionary
         VIDEO_CONFIG["players_list"][id] = new_player
 
 
@@ -687,7 +713,7 @@ def process_player(player: player.Player) -> None:
         player.name,
         f'{VIDEO_CONFIG["match_id"]}_{player.name}_full_comp.mp4'
     )
-    combine_videos(player.first_half_output, player.second_half_output, output_path)
+    combine_videos(player, output_path)
 
 
 def start_pipeline(match_info: list[dict[str, Any]]) -> None:
@@ -704,28 +730,3 @@ def start_pipeline(match_info: list[dict[str, Any]]) -> None:
     num_threads = min(os.cpu_count() or 4, len(players_list))
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         executor.map(process_player, players_list.values())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
