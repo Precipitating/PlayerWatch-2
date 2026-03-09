@@ -63,6 +63,9 @@ class Player:
         self.action_conclusion = selected
 
     def filter_events(self):
+        """
+        Checkbox to select specific actions to filter for the chosen player
+        """
         filter_actions = questionary.select(f"Filter specific actions for {self.name}?", ["Yes", "No"]).ask()
 
         if filter_actions == "No":

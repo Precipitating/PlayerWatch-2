@@ -186,3 +186,6 @@ fabric.properties
 FootballMatchData/
 FootballData/
 *.mp4
+main.dist/
+*.exe
+*.ico

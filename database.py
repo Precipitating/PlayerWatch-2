@@ -1,7 +1,6 @@
 import sqlite3
 import json
 import os
-import sys
 import questionary
 
 VIDEO_CONFIG =  {
@@ -18,12 +17,10 @@ VIDEO_CONFIG =  {
 
     "players_list": {},
 
-    "cwd": os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
-
 }
 
 ACTION_TYPES = [
-    questionary.Choice("General Player Events", disabled="Category"),
+    questionary.Choice("-----------------General Player Events-----------------", disabled="-"),
     "Aerial",
     "BallRecovery",
     "BallTouch",
@@ -47,7 +44,7 @@ ACTION_TYPES = [
     "OffsideProvoked",
     "SavedShot",
 
-    questionary.Choice("Goalkeeper", disabled="Category"),
+    questionary.Choice("-----------------Goalkeeper-----------------", disabled="-"),
     # Goalkeeper Only
     "Claim",
     "KeeperPickup",
@@ -57,13 +54,13 @@ ACTION_TYPES = [
     "Save",
     "Smother",
 
-    questionary.Choice("Match Events", disabled="Category"),
+    questionary.Choice("-----------------Match Events-----------------", disabled="-"),
     # Admin / Match Events
     "SubstitutionOff",
     "SubstitutionOn",
 ]
 
-DB_PATH = f'{VIDEO_CONFIG["cwd"]}/FootballData/match_events.db'
+DB_PATH = os.path.join("FootballData", "match_events.db")
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
