@@ -73,6 +73,7 @@ def get_start_offset():
 
 
 
+
 @click.command()
 @click.option("--link",
               prompt=click.style("Enter WhoScored link (must be a live link!)",
@@ -338,6 +339,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
     MAX_CLIP_DURATION = 10
     MIN_CLIP_DURATION = 1
 
+
     def clamp_end(start: int, end: int):
         duration = end - start
         if duration > MAX_CLIP_DURATION:
@@ -345,7 +347,6 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
         if duration < MIN_CLIP_DURATION:
             return start + MIN_CLIP_DURATION
         return end
-
 
     def save_event(playerClass: player.Player, end: int):
         period = playerClass.current_period
@@ -355,7 +356,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
 
         event_data = {
             "start": start_offset,
-            "end": clamp_end(start_offset, end_offset),
+            "end":  clamp_end(start_offset, end_offset),
             "type": playerClass.start_event_type,
             "outcome": playerClass.success,
             "period": period
@@ -380,17 +381,18 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
     last_total_seconds = 0
 
     for event in match_event:
+        # Extract dictionary keys into variables for easier access
         current_player_id = str(event.get("playerId", ""))
         minute = event.get("minute", 0)
         second = event.get("second", 0)
         current_period = event.get("period", {}).get("displayName")
         current_event_type = event.get("type", {}).get("displayName")
-        # FIX #3: Use safe access consistently
         outcome = event.get("outcomeType", {}).get("displayName")
 
+        # current match time period (in seconds)
         total_seconds = (minute * 60) + second if current_period == "FirstHalf" else ((minute - 45) * 60) + second
 
-        #Close all open clips on period transition so first-half clips
+        # Close all open clips on period transition so first-half clips
         # don't bleed into the second half with mismatched timestamps/offsets
         if previous_period is not None and current_period != previous_period:
             close_all_clips(last_total_seconds)
@@ -402,36 +404,36 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
             close_all_clips(total_seconds)
             continue
 
-        # FIX #5: O(1) dict lookup instead of iterating all players to find a match
         matching_player = players_list.get(current_player_id)
 
         if matching_player is not None:
             should_process = True
-
-            # Action conclusion filter
-            if matching_player.action_conclusion is not None:
-                if not matching_player.event_is_action_conclusion(outcome):
-                    if matching_player.current_start is not None:
-                        save_event(matching_player, total_seconds)
-                    should_process = False
-
-            # Filtered events filter
-            if should_process and matching_player.filtered_events is not None:
-                if current_event_type not in matching_player.filtered_events:
-                    if matching_player.current_start is not None:
-                        save_event(matching_player, total_seconds)
-                    should_process = False
 
             if should_process:
                 if matching_player.current_start is not None:
                     # Player still on the ball - extend clip, update outcome
                     matching_player.success = outcome
                 else:
+                    # Events filter
+                    if matching_player.filtered_events and (current_event_type not in matching_player.filtered_events):
+                        continue
+
+                    # Action conclusion filter
+                    if matching_player.action_conclusion and not matching_player.event_is_action_conclusion(outcome):
+                        continue
+
                     # Start new clip — store the period alongside the start time
                     matching_player.current_start = total_seconds
                     matching_player.current_period = current_period
                     matching_player.start_event_type = current_event_type
                     matching_player.success = outcome
+
+                    if matching_player.manual_end:
+                        save_event(matching_player, total_seconds + matching_player.end_offset)
+
+
+
+
 
         # Close all other players' open clips (different player touched the ball)
         close_all_clips(total_seconds, exclude_id=current_player_id)
@@ -466,7 +468,6 @@ def merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-
 def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -> subprocess.Popen:
     """
     Use ffmpeg to crop areas of a video according to the player's class timeline data and
@@ -476,6 +477,8 @@ def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -
         player (player): The player class (should have processed data already)
         player_events (list[dict[str, Any]]): The first/second half events of a specific player (inside player class)
     """
+
+
 
     if not player_events:
         print(f"{player.name} has no events in this half ")
@@ -575,6 +578,14 @@ def initialize_player_class(match_dict: dict[str, str]):
         print(f'Initializing player {name} with id {id}')
         new_player = Player(name, id)
 
+        # Select automatic end detection or fixed second offset after action occurs
+        new_player.auto_end_detection_option()
+
+        if new_player.manual_end:
+            # Extra seconds added onto auto end detection's selection OR after an action occurs (if selected fixed end offset option)
+            new_player.get_end_offset()
+
+
         # Custom audio option
         new_player.get_audio()
 
@@ -583,6 +594,7 @@ def initialize_player_class(match_dict: dict[str, str]):
 
         # Choose action filter if required
         new_player.filter_events()
+
 
         # Store player to a dictionary
         VIDEO_CONFIG["players_list"][id] = new_player

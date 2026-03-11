@@ -1,3 +1,4 @@
+import click
 import questionary
 from utility import file_picker
 from database import ACTION_TYPES
@@ -21,6 +22,8 @@ class Player:
         self.custom_audio = None
         self.action_conclusion = None
         self.filtered_events = None
+        self.end_offset = 0
+        self.manual_end = None
 
     def get_audio(self) -> None:
         """
@@ -41,9 +44,24 @@ class Player:
         matches the player's setting of only wanting succesful actions (or not)
 
         Args:
-            current_action_conclusion (str): Either Successful or Unsuccesful, should be the current event's conclusion
+            current_action_conclusion (str): Either Successful or Unsuccessful, should be the current event's conclusion
         """
         return current_action_conclusion == self.action_conclusion
+
+    def get_end_offset(self):
+        """ Apply an end offset after action made (in seconds)"""
+        self.end_offset = click.prompt("Enter an end offset after each action occurs (s)", type= int)
+
+
+    def auto_end_detection_option(self):
+        """ Give the ability for the user to only apply a fixed offset (seconds) after an action occurs,
+            or detect when another player initiates an action before ending the clip
+        """
+        manual_end = questionary.select("Auto clip end detection or shall we end each action after x seconds? (via end offset input)", choices=["Auto detect", "Manual Offset"]).ask()
+
+        self.manual_end = True if manual_end == "Manual Offset" else False
+
+
 
     def choose_action_conclusion(self) -> None:
         """
