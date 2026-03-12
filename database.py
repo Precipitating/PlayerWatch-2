@@ -15,6 +15,8 @@ VIDEO_CONFIG =  {
     "start_offset": None,
     "end_offset": None,
 
+    "watermark_path": None,
+
     "players_list": {},
 
 }
@@ -58,6 +60,56 @@ ACTION_TYPES = [
     # Admin / Match Events
     "SubstitutionOff",
     "SubstitutionOn",
+]
+
+VIDEO_TRANSITIONS = [
+    "random",
+    "fade",
+    "wipeleft",
+    "wiperight",
+    "wipeup",
+    "wipedown",
+    "slideleft",
+    "slideright",
+    "slideup",
+    "slidedown",
+    "circlecrop",
+    "rectcrop",
+    "distance",
+    "fadeblack",
+    "fadewhite",
+    "radial",
+    "smoothleft",
+    "smoothright",
+    "smoothup",
+    "smoothdown",
+    "circleopen",
+    "circleclose",
+    "vertopen",
+    "vertclose",
+    "horzopen",
+    "horzclose",
+    "dissolve",
+    "pixelize",
+    "diagtl",
+    "diagtr",
+    "diagbl",
+    "diagbr",
+    "hlslice",
+    "hrslice",
+    "vuslice",
+    "vdslice",
+    "hblur",
+    "fadegrays",
+    "wipetl",
+    "wipetr",
+    "wipebl",
+    "wipebr",
+    "squeezeh",
+    "squeezev",
+    "zoomin",
+    "fadefast",
+    "fadeslow"
 ]
 
 DB_PATH = os.path.join("FootballData", "match_events.db")

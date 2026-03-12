@@ -15,7 +15,7 @@ from player import Player
 from concurrent.futures import ThreadPoolExecutor
 import sys
 
-from database import VIDEO_CONFIG, ACTION_TYPES
+from database import VIDEO_CONFIG, ACTION_TYPES, VIDEO_TRANSITIONS
 
 
 def validate_whoscored_link(ctx: click.Context, param: click.Parameter, value: str) -> str:
@@ -72,6 +72,17 @@ def get_start_offset():
     VIDEO_CONFIG["start_offset"] = click.prompt(text=click.style("Seconds before action occurs offset", bold= True, fg="green"), type=click.IntRange(min=0))
 
 
+def get_watermark_img():
+    path = file_picker("*.png *.jpg *.jpeg *.webp")
+
+    if not path:
+        click.secho("Can't find watermark path", fg="red")
+        return False
+
+    VIDEO_CONFIG["watermark_path"] = path
+
+    return True
+
 
 
 @click.command()
@@ -101,6 +112,13 @@ def start_program(link: str) -> None :
     click.secho("Select second half video", fg="green", bold=True)
     second_half_valid = get_video(2)
     if not second_half_valid: return
+
+    watermark_option = questionary.select(message="Apply global picture watermark?", choices=["Yes", "No"]).ask()
+
+    if watermark_option == "Yes":
+        get_watermark_img()
+
+
 
 
     # Sync video with match time (if required)
@@ -468,6 +486,20 @@ def merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+
+
+def get_video_size(path):
+    result = subprocess.run([
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "v:0",
+        path
+    ], capture_output=True, text=True)
+    s = json.loads(result.stdout)["streams"][0]
+    return int(s["width"]), int(s["height"])
+
+
 def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -> subprocess.Popen:
     """
     Use ffmpeg to crop areas of a video according to the player's class timeline data and
@@ -509,38 +541,79 @@ def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -
 
     segments = merge_segments(segments)
     n = len(segments)
-
-    # Ffmpeg commands for clip trimming using segment list (timeline data)
     parts = []
+
+    # 1. Trim video segments
     for i, (start, end) in enumerate(segments):
         parts.append(f"[0:v]trim={start}:{end},setpts=PTS-STARTPTS[v{i}]")
 
-    # Build Ffmpeg commands
-    # Replace default audio track if VIDEO_CONFIG["audio_path"] is not None
-    if audio_path:
+    # 2. Transitions between segments (optional)
+    if player.chosen_transition and n > 1:
+        # Chain xfade between consecutive segments
+        # v0 + v1 -> xf0, xf0 + v2 -> xf1, etc.
+        td = 0.5
+        prev = "v0"
+        for i in range(1, n):
+            # offset = duration of previous segment minus overlap
+            seg_dur = segments[i - 1][1] - segments[i - 1][0]
+            offset = seg_dur - td if i == 1 else offset + (segments[i - 1][1] - segments[i - 1][0]) - td
+            out_label = f"xf{i}" if i < n - 1 else "outv"
+            parts.append(
+                f"[{prev}][v{i}]xfade=transition={player.chosen_transition if player.chosen_transition != "random" else random.choice(VIDEO_TRANSITIONS)}"
+                f":duration={td}:offset={offset}[{out_label}]"
+            )
+            prev = f"xf{i}"
+        video_out = "[outv]"
+    else:
+        # Simple concat, no transitions
         concat_in = "".join(f"[v{i}]" for i in range(n))
         parts.append(f"{concat_in}concat=n={n}:v=1:a=0[outv]")
-        cmd = [
-            "ffmpeg", "-i", video_path,
-            "-stream_loop", "-1", "-i", audio_path,
-            "-filter_complex", ";".join(parts),
-            "-map", "[outv]", "-map", "1:a",
-            "-c:v", "libx264", "-crf", "23", "-c:a", "aac",
-            "-shortest", "-y", output_file
-        ]
+        video_out = "[outv]"
+
+    # 3. Watermark overlay (optional)
+    watermark_path = VIDEO_CONFIG["watermark_path"]
+    if watermark_path:
+        vid_w, vid_h = get_video_size(video_path)
+        wm_ratio = 0.1
+        wm_padding = int(vid_h * 0.03)       # 3% from bottom
+        wm_width = int(vid_w * wm_ratio)     # exact pixels
+
+        parts.append(
+            f"[2:v]scale={wm_width}:-1[wm_scaled];"
+            f"{video_out}[wm_scaled]overlay=(W-w)/2:(H-h-{wm_padding})[wmv]"
+        )
+        video_out = "[wmv]"
+
+    # 4. Audio handling
+    if audio_path:
+        inputs = ["-i", video_path, "-stream_loop", "-1", "-i", audio_path]
+        mappings = ["-map", video_out, "-map", "1:a", "-shortest"]
     else:
-    # Else keep audio data the same as original inputs
         for i, (start, end) in enumerate(segments):
             parts.append(f"[0:a]atrim={start}:{end},asetpts=PTS-STARTPTS[a{i}]")
-        concat_in = "".join(f"[v{i}][a{i}]" for i in range(n))
-        parts.append(f"{concat_in}concat=n={n}:v=1:a=1[outv][outa]")
-        cmd = [
-            "ffmpeg", "-i", video_path,
-            "-filter_complex", ";".join(parts),
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-crf", "23", "-c:a", "aac",
-            "-y", output_file
-        ]
+        a_concat = "".join(f"[a{i}]" for i in range(n))
+        parts.append(f"{a_concat}concat=n={n}:v=0:a=1[outa]")
+        inputs = ["-i", video_path]
+        mappings = ["-map", video_out, "-map", "[outa]"]
+
+    # 5. Watermark input (must be after audio input to keep correct index)
+
+    if watermark_path:
+        wm_index = len([x for x in inputs if x == "-i"])  # next available index
+        inputs.extend(["-i", watermark_path])
+        # Fix the filter to use correct input index
+        parts = [p.replace("[2:v]", f"[{wm_index}:v]") for p in parts]
+
+    # 6. Build final command
+    cmd = [
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", ";".join(parts),
+        *mappings,
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-crf", "23", "-c:a", "aac",
+        output_file
+    ]
+
 
     # Run the ffmpeg command to clip using segments data (seconds) and combine into one video
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -594,6 +667,8 @@ def initialize_player_class(match_dict: dict[str, str]):
 
         # Choose action filter if required
         new_player.filter_events()
+
+        new_player.get_transition()
 
 
         # Store player to a dictionary

@@ -1,7 +1,11 @@
 import click
 import questionary
 from utility import file_picker
-from database import ACTION_TYPES
+from database import ACTION_TYPES, VIDEO_TRANSITIONS
+
+
+
+
 class Player:
     """
     Stores player information and most importantly, the events
@@ -24,6 +28,7 @@ class Player:
         self.filtered_events = None
         self.end_offset = 0
         self.manual_end = None
+        self.chosen_transition = None
 
     def get_audio(self) -> None:
         """
@@ -38,6 +43,7 @@ class Player:
                 self.custom_audio = audio_path
 
 
+
     def event_is_action_conclusion(self, current_action_conclusion: str) -> bool:
         """
         Simple helper to return if the event's conclusion is succesful or not, and checks if it
@@ -48,6 +54,17 @@ class Player:
         """
         return current_action_conclusion == self.action_conclusion
 
+
+    def get_transition(self):
+
+        use_transition = questionary.select("Use a video transition effect?", choices=["Yes", "No"]).ask()
+
+        if use_transition == "Yes":
+            self.chosen_transition = questionary.select(message= "Select video transition to apply per action", choices = VIDEO_TRANSITIONS).ask()
+
+
+
+
     def get_end_offset(self):
         """ Apply an end offset after action made (in seconds)"""
         self.end_offset = click.prompt("Enter an end offset after each action occurs (s)", type= int)
@@ -57,15 +74,17 @@ class Player:
         """ Give the ability for the user to only apply a fixed offset (seconds) after an action occurs,
             or detect when another player initiates an action before ending the clip
         """
-        manual_end = questionary.select("Auto clip end detection or shall we end each action after x seconds? (via end offset input)", choices=["Auto detect", "Manual Offset"]).ask()
+        manual_end = questionary.select("Auto clip end detection or fixed end offset?", choices=["Auto detect", "Manual Offset"]).ask()
 
         self.manual_end = True if manual_end == "Manual Offset" else False
 
 
 
+
+
     def choose_action_conclusion(self) -> None:
         """
-        Determine if we want to clip succesful/unsucessful actions via
+        Determine if we want to clip successful/unsuccessful actions via
         questionary select input
 
         """
