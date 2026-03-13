@@ -24,6 +24,12 @@ Personalize the output for every player.
 Built for speed. 
 * The tool utilizes **concurrent threading** to process multiple players simultaneously, significantly reducing the total time required for bulk exports.
 
+### 🖼️ Image placement
+Apply an image on the bottom of the video, mainly for watermark placement.
+
+### 🏃Transitions
+Optionally apply a transition per player action, using xfade
+
 ---
 
 ## 📊 Data Source
