@@ -12,6 +12,7 @@ from utility import file_picker
 import database
 import player
 from player import Player
+import clipper
 from concurrent.futures import ThreadPoolExecutor
 import sys
 
@@ -285,7 +286,7 @@ def parse_site(link: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]] |
     return match_dict, match_event
 
 
-def combine_videos(player: player.Player, output_file: str) -> None:
+def combine_videos(player: Player, output_file: str) -> None:
     """
     Use Ffmpeg to combine two clips together, mainly used for combining first half and second half clips.
     Args:
@@ -333,14 +334,14 @@ def combine_videos(player: player.Player, output_file: str) -> None:
         cmd,
         input=concat_input.encode(),
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.PIPE
     )
 
     print(f"Combined to: {output_file}")
 
 
 
-def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player.Player]):
+def get_events(match_event: list[dict[str, Any]], players_list: dict[str,Player]):
     """
     The main processing function that goes through match_event (has all match events data) and stores its timestamps
     if the event's player id key exists in player_list
@@ -357,7 +358,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
     MAX_CLIP_DURATION = 10
     MIN_CLIP_DURATION = 1
 
-
+    # If no events for a long time due to celebration or something, clamp it to 10 seconds.
     def clamp_end(start: int, end: int):
         duration = end - start
         if duration > MAX_CLIP_DURATION:
@@ -366,7 +367,8 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
             return start + MIN_CLIP_DURATION
         return end
 
-    def save_event(playerClass: player.Player, end: int):
+    # TRIM END
+    def save_event(playerClass: Player, end: int):
         period = playerClass.current_period
         offset_key = "first_half_offset" if period == "FirstHalf" else "second_half_offset"
         start_offset = playerClass.current_start - VIDEO_CONFIG[offset_key]
@@ -427,6 +429,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
         if matching_player is not None:
             should_process = True
 
+            # TARGET PLAYER FOUND
             if should_process:
                 if matching_player.current_start is not None:
                     # Player still on the ball - extend clip, update outcome
@@ -440,7 +443,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
                     if matching_player.action_conclusion and not matching_player.event_is_action_conclusion(outcome):
                         continue
 
-                    # Start new clip — store the period alongside the start time
+                    # Start new clip (TRIM START)
                     matching_player.current_start = total_seconds
                     matching_player.current_period = current_period
                     matching_player.start_event_type = current_event_type
@@ -465,42 +468,7 @@ def get_events(match_event: list[dict[str, Any]], players_list: dict[str, player
 
 
 
-def merge_segments(segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """
-    Merge overlapping timeline data to create a seamless clip instead of repeatinmg clips on overlapping timeline data
-    Args:
-        segments (list[tuple[int,int]]): Timeline data pair start -> end. If empty, returns empty list.
-    Returns:
-        list[tuple[int,int]]: Processed overlapped list
-    """
-    if not segments:
-        return []
-    sorted_segs = sorted(segments, key=lambda x: x[0])
-    merged = [sorted_segs[0]]
-    for start, end in sorted_segs[1:]:
-        prev_start, prev_end = merged[-1]
-        if start <= prev_end:
-            merged[-1] = (prev_start, max(prev_end, end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-
-
-def get_video_size(path):
-    result = subprocess.run([
-        "ffprobe", "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams",
-        "-select_streams", "v:0",
-        path
-    ], capture_output=True, text=True)
-    s = json.loads(result.stdout)["streams"][0]
-    return int(s["width"]), int(s["height"])
-
-
-def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -> subprocess.Popen:
+def start_clipping(player: Player, player_events: list[dict[str, Any]]) -> subprocess.Popen:
     """
     Use ffmpeg to crop areas of a video according to the player's class timeline data and
     combine them togeher to create a first half/second half clip
@@ -509,8 +477,6 @@ def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -
         player (player): The player class (should have processed data already)
         player_events (list[dict[str, Any]]): The first/second half events of a specific player (inside player class)
     """
-
-
 
     if not player_events:
         print(f"{player.name} has no events in this half ")
@@ -532,87 +498,29 @@ def start_clipping(player: player.Player, player_events: list[dict[str, Any]]) -
     # Create output path depending on period
     setattr(player,"first_half_output" if period == "FirstHalf" else "second_half_output", output_file)
 
-    # Add offsets to the existing player timeline data and store it in segments
-    segments = []
-    for event in player_events:
-        start = max(0, event["start"] - VIDEO_CONFIG["start_offset"])
-        end = event["end"]
-        segments.append((start, end))
+    # Initialize clipper class and create the ffmpeg command list
+    ffmpeg_clipper = clipper.Clipper()
 
-    segments = merge_segments(segments)
-    n = len(segments)
-    parts = []
+    # Add offsets to the existing player timeline data and store it in segments
+    ffmpeg_clipper.add_offsets_to_segments(player_events= player_events)
 
     # 1. Trim video segments
-    for i, (start, end) in enumerate(segments):
-        parts.append(f"[0:v]trim={start}:{end},setpts=PTS-STARTPTS[v{i}]")
+    ffmpeg_clipper.trim_clips()
 
     # 2. Transitions between segments (optional)
-    if player.chosen_transition and n > 1:
-        # Chain xfade between consecutive segments
-        # v0 + v1 -> xf0, xf0 + v2 -> xf1, etc.
-        td = 0.5
-        prev = "v0"
-        for i in range(1, n):
-            # offset = duration of previous segment minus overlap
-            seg_dur = segments[i - 1][1] - segments[i - 1][0]
-            offset = seg_dur - td if i == 1 else offset + (segments[i - 1][1] - segments[i - 1][0]) - td
-            out_label = f"xf{i}" if i < n - 1 else "outv"
-            parts.append(
-                f"[{prev}][v{i}]xfade=transition={player.chosen_transition if player.chosen_transition != "random" else random.choice(VIDEO_TRANSITIONS)}"
-                f":duration={td}:offset={offset}[{out_label}]"
-            )
-            prev = f"xf{i}"
-        video_out = "[outv]"
-    else:
-        # Simple concat, no transitions
-        concat_in = "".join(f"[v{i}]" for i in range(n))
-        parts.append(f"{concat_in}concat=n={n}:v=1:a=0[outv]")
-        video_out = "[outv]"
+    ffmpeg_clipper.apply_transitions(player)
 
     # 3. Watermark overlay (optional)
-    watermark_path = VIDEO_CONFIG["watermark_path"]
-    if watermark_path:
-        vid_w, vid_h = get_video_size(video_path)
-        wm_ratio = 0.1
-        wm_padding = int(vid_h * 0.03)       # 3% from bottom
-        wm_width = int(vid_w * wm_ratio)     # exact pixels
+    ffmpeg_clipper.define_watermark(video_path)
 
-        parts.append(
-            f"[2:v]scale={wm_width}:-1[wm_scaled];"
-            f"{video_out}[wm_scaled]overlay=(W-w)/2:(H-h-{wm_padding})[wmv]"
-        )
-        video_out = "[wmv]"
-
-    # 4. Audio handling
-    if audio_path:
-        inputs = ["-i", video_path, "-stream_loop", "-1", "-i", audio_path]
-        mappings = ["-map", video_out, "-map", "1:a", "-shortest"]
-    else:
-        for i, (start, end) in enumerate(segments):
-            parts.append(f"[0:a]atrim={start}:{end},asetpts=PTS-STARTPTS[a{i}]")
-        a_concat = "".join(f"[a{i}]" for i in range(n))
-        parts.append(f"{a_concat}concat=n={n}:v=0:a=1[outa]")
-        inputs = ["-i", video_path]
-        mappings = ["-map", video_out, "-map", "[outa]"]
+    # 4. Apply custom audio if selected else leave be
+    ffmpeg_clipper.apply_custom_audio(audio_path, video_path)
 
     # 5. Watermark input (must be after audio input to keep correct index)
+    ffmpeg_clipper.apply_watermark()
 
-    if watermark_path:
-        wm_index = len([x for x in inputs if x == "-i"])  # next available index
-        inputs.extend(["-i", watermark_path])
-        # Fix the filter to use correct input index
-        parts = [p.replace("[2:v]", f"[{wm_index}:v]") for p in parts]
-
-    # 6. Build final command
-    cmd = [
-        "ffmpeg", "-y", *inputs,
-        "-filter_complex", ";".join(parts),
-        *mappings,
-        "-pix_fmt", "yuv420p",
-        "-c:v", "libx264", "-crf", "23", "-c:a", "aac",
-        output_file
-    ]
+    # 6. Build final CMD
+    cmd = ffmpeg_clipper.build_final_cmd(output_file)
 
 
     # Run the ffmpeg command to clip using segments data (seconds) and combine into one video
@@ -676,7 +584,7 @@ def initialize_player_class(match_dict: dict[str, str]):
 
 
 
-def process_player(player: player.Player) -> None:
+def process_player(player: Player) -> None:
     """
     Begins the process to clip processed timeline data of a specific player class
 

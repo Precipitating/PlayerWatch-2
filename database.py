@@ -17,6 +17,8 @@ VIDEO_CONFIG =  {
 
     "watermark_path": None,
 
+    "transition_time": 0.5,
+
     "players_list": {},
 
 }
@@ -64,52 +66,88 @@ ACTION_TYPES = [
 
 VIDEO_TRANSITIONS = [
     "random",
+    # Fades
     "fade",
+    "fadeblack",
+    "fadewhite",
+    "fadegrays",
+    "fadefast",
+    "fadeslow",
+    "distance",
+    "dissolve",
+
+    # Wipes
     "wipeleft",
     "wiperight",
     "wipeup",
     "wipedown",
-    "slideleft",
-    "slideright",
-    "slideup",
-    "slidedown",
-    "circlecrop",
-    "rectcrop",
-    "distance",
-    "fadeblack",
-    "fadewhite",
-    "radial",
-    "smoothleft",
-    "smoothright",
-    "smoothup",
-    "smoothdown",
-    "circleopen",
-    "circleclose",
-    "vertopen",
-    "vertclose",
-    "horzopen",
-    "horzclose",
-    "dissolve",
-    "pixelize",
-    "diagtl",
-    "diagtr",
-    "diagbl",
-    "diagbr",
-    "hlslice",
-    "hrslice",
-    "vuslice",
-    "vdslice",
-    "hblur",
-    "fadegrays",
     "wipetl",
     "wipetr",
     "wipebl",
     "wipebr",
+
+    # Slides
+    "slideleft",
+    "slideright",
+    "slideup",
+    "slidedown",
+
+    # Smooths
+    "smoothleft",
+    "smoothright",
+    "smoothup",
+    "smoothdown",
+
+    # Covers
+    "coverleft",
+    "coverright",
+    "coverup",
+    "coverdown",
+
+    # Reveals
+    "revealleft",
+    "revealright",
+    "revealup",
+    "revealdown",
+
+    # Circles & Shapes
+    "circlecrop",
+    "circleopen",
+    "circleclose",
+    "rectcrop",
+    "vertopen",
+    "vertclose",
+    "horzopen",
+    "horzclose",
+
+    # Diagonals
+    "diagtl",
+    "diagtr",
+    "diagbl",
+    "diagbr",
+
+    # Slices
+    "hlslice",
+    "hrslice",
+    "vuslice",
+    "vdslice",
+
+    # Wind
+    "hlwind",
+    "hrwind",
+    "vuwind",
+    "vdwind",
+
+    # Squeeze
     "squeezeh",
     "squeezev",
+
+    # Blur
+    "hblur",
+
+    # Other
+    "pixelize",
     "zoomin",
-    "fadefast",
-    "fadeslow"
 ]
 
 DB_PATH = os.path.join("FootballData", "match_events.db")
@@ -117,7 +155,6 @@ DB_PATH = os.path.join("FootballData", "match_events.db")
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
     return conn
 
 def init_db() -> bool:
